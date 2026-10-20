@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Midnight Ignition — A-Frame Game</title>
+  <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
+  <style>
+    html, body { margin:0; width:100%; height:100%; overflow:hidden; background:#030611; font-family:system-ui, sans-serif; }
+    #ar-camera { position:fixed; inset:0; width:100%; height:100%; object-fit:cover; z-index:0; background:#000; }
+    a-scene { position:fixed; inset:0; z-index:1; }
+    #hud { position:fixed; z-index:10; top:env(safe-area-inset-top, 12px); left:0; right:0; padding:16px; text-align:center; color:#f4f7ff; pointer-events:none; text-shadow:0 2px 12px #000; }
+    #title { font-size:clamp(20px,4vw,30px); font-weight:800; letter-spacing:.12em; }
+    #status { margin-top:7px; font-size:14px; color:#b7c7e8; }
+    #restart { pointer-events:auto; margin-top:12px; border:1px solid #7890b8; border-radius:999px; padding:10px 18px; color:white; background:#101b31cc; font-size:14px; }
+    #hint { position:fixed; z-index:10; bottom:calc(env(safe-area-inset-bottom, 0px) + 16px); left:12px; right:12px; text-align:center; color:#9caccb; font-size:12px; pointer-events:none; }
+    #arGate { position:fixed; inset:0; z-index:20; background:#030611; display:flex; flex-direction:column; align-items:center; justify-content:center; color:#f4f7ff; text-align:center; padding:24px; }
+    #arGate h1 { font-size:20px; font-weight:800; letter-spacing:.1em; margin:0 0 10px; }
+    #arGate p { max-width:320px; font-size:14px; color:#b7c7e8; margin:0 0 18px; line-height:1.5; }
+    #startAR { pointer-events:auto; border:1px solid #7890b8; border-radius:999px; padding:12px 22px; color:white; background:#101b31; font-size:15px; }
+    #startAR:disabled { opacity:.6; }
+    #arGateStatus { margin-top:14px; font-size:12px; color:#9caccb; min-height:1.4em; }
+  </style>
+</head>
+<body>
+  <!-- Live device camera feed, shown behind the transparent A-Frame canvas. -->
+  <video id="ar-camera" autoplay muted playsinline></video>
+
+  <div id="arGate">
+    <h1>MIDNIGHT IGNITION — AR</h1>
+    <p>This AR scene uses your camera as a live backdrop, and your phone's motion sensors to look around. Grant both to begin.</p>
+    <button id="startAR" type="button">📷 Enable Camera &amp; Motion</button>
+    <div id="arGateStatus" aria-live="polite"></div>
+  </div>
+
+  <div id="hud">
+    <div id="title">MIDNIGHT IGNITION</div>
+    <div id="status" aria-live="polite">Loading Ravan model…</div>
+    <button id="restart" type="button">🔥 Ignite Ravan</button>
+  </div>
+  <div id="hint">Ravan 3D model · Move your phone to look around · Tap to ignite</div>
+
+  <a-scene
+    renderer="colorManagement: true; physicallyCorrectLights: true; alpha: true"
+    vr-mode-ui="enabled: false"
+    device-orientation-permission-ui="enabled: false"
+    loading-screen="enabled: false">
+
+    <a-assets timeout="60000"></a-assets>
+
+    <!-- The model's material is fully metallic (metalness:1, roughness:1), so it has
+         almost no diffuse response — it only shows up via specular highlights and
+         environment reflections. A bright ambient alone won't make it visible; it
+         needs light from several directions plus a reflective environment map
+         (generated in JS below, fed only to scene.environment — scene.background
+         stays transparent so the live camera feed shows through for AR). -->
+    <a-entity light="type: ambient; color: #8fa6d9; intensity: .9"></a-entity>
+    <a-entity light="type: hemisphere; color: #9db8ff; groundColor: #0b1326; intensity: 1.1"></a-entity>
+    <a-entity id="moonlight" light="type: directional; color:#bcd0ff; intensity:1.6" position="-4 8 5"></a-entity>
+    <a-entity id="rimlight" light="type: directional; color:#8aa2e8; intensity:.9" position="5 3 -6"></a-entity>
+
+    <!-- User-provided Ravan model; kept close enough and centered in view -->
+    <a-entity id="blockRig" position="0 0 -28">
+      <a-entity id="block" gltf-model="url(./ravan-model/model.glb)"
+                position="0 0 0" scale="1 1 1"
+                animation="property: rotation; to: 0 360 0; dur: 30000; easing: linear; loop: true"></a-entity>
+      <a-entity id="fire" fire-effect visible="false"></a-entity>
+      <a-entity id="fireGlow" position="0 0 0" light="type: point; color:#ff5a12; intensity:0; distance:35; decay:2"></a-entity>
+    </a-entity>
+
+    <a-entity id="cameraRig" position="0 7.5 0">
+      <a-camera look-controls="touchEnabled:true; mouseEnabled:true" wasd-controls-enabled="false">
+        <a-cursor color="#ffb15a" opacity=".6" fuse="false"></a-cursor>
+      </a-camera>
+    </a-entity>
+  </a-scene>
+
+  <script>
+    AFRAME.registerComponent('fire-effect', {
+      init: function () {
+        const palette = ['#fff2ad', '#ffd04c', '#ff8a18', '#ff4814', '#c91e12'];
+        // Ravan is normalized to about 16 units tall; surround its body with flames.
+        const halfW = 6.2, halfD = 4.6, modelHeight = 16;
+        for (let i = 0; i < 100; i++) {
+          const side = i % 4;
+          const along = (Math.random() * 2 - 1) * (side < 2 ? halfW : halfD);
+          const y = Math.random() * modelHeight;
+          const x = side < 2 ? along : (side === 2 ? -halfW : halfW);
+          const z = side < 2 ? (side === 0 ? -halfD : halfD) : along;
+          const flame = document.createElement('a-cone');
+          const h = .8 + Math.random() * 2.1;
+          flame.setAttribute('position', `${x} ${y} ${z}`);
+          flame.setAttribute('radius-bottom', .12 + Math.random() * .24);
+          flame.setAttribute('radius-top', .006);
+          flame.setAttribute('height', h);
+          flame.setAttribute('rotation', `${(Math.random()-.5)*20} ${Math.random()*360} ${(Math.random()-.5)*20}`);
+          const color = palette[Math.floor(Math.random()*palette.length)];
+          flame.setAttribute('material', `shader:standard; color:${color}; emissive:${color}; emissiveIntensity:2; transparent:true; opacity:.92; roughness:.6; side:double`);
+          flame.setAttribute('animation__rise', `property: position; from:${x} ${y} ${z}; to:${x+(Math.random()-.5)*.5} ${y+1+Math.random()*1.7} ${z+(Math.random()-.5)*.5}; dur:${500+Math.random()*800}; dir:alternate; loop:true; easing:easeInOutSine`);
+          flame.setAttribute('animation__flicker', `property: scale; from:1 .7 1; to:.75 1.3 .75; dur:${250+Math.random()*450}; dir:alternate; loop:true`);
+          this.el.appendChild(flame);
+        }
+        for (let i = 0; i < 110; i++) {
+          const spark = document.createElement('a-sphere');
+          const x = (Math.random()*2-1) * 8, z = (Math.random()*2-1) * 6, y = Math.random() * 20;
+          spark.setAttribute('radius', .025 + Math.random()*.05);
+          spark.setAttribute('position', `${x} ${y} ${z}`);
+          const color = Math.random()>.5 ? '#ffbd54' : '#ff4a18';
+          spark.setAttribute('material', `shader:standard; color:${color}; emissive:${color}; emissiveIntensity:2`);
+          spark.setAttribute('animation__rise', `property: position; from:${x} ${y} ${z}; to:${x+(Math.random()-.5)*1.2} ${y+2+Math.random()*4} ${z+(Math.random()-.5)*1.2}; dur:${1000+Math.random()*1800}; delay:${Math.random()*1000}; loop:true; easing:linear`);
+          this.el.appendChild(spark);
+        }
+      }
+    });
+
+    // Build a soft gradient "environment" purely for reflections — NOT as the
+    // visible background. In AR the live camera feed (behind the transparent
+    // canvas) is the real background; this texture is only fed to
+    // scene.environment so the model's fully metallic/fully rough material
+    // has something to reflect, since direct lights alone leave it near-black.
+    function applyEnvironmentReflections(sceneEl) {
+      const renderer = sceneEl.renderer;
+      const scene = sceneEl.object3D;
+      if (!renderer || !scene) return;
+
+      const width = 4, height = 256;
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      const grad = ctx.createLinearGradient(0, 0, 0, height);
+      grad.addColorStop(0.00, '#242a38'); // overhead
+      grad.addColorStop(0.45, '#394257'); // upper
+      grad.addColorStop(0.72, '#575f70'); // lower
+      grad.addColorStop(0.90, '#7a7f87'); // horizon glow — gives the metal a readable highlight band
+      grad.addColorStop(1.00, '#20242c'); // ground
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, width, height);
+
+      const envSourceTexture = new THREE.CanvasTexture(canvas);
+      envSourceTexture.mapping = THREE.EquirectangularReflectionMapping;
+      if ('colorSpace' in envSourceTexture && THREE.SRGBColorSpace) {
+        envSourceTexture.colorSpace = THREE.SRGBColorSpace;
+      } else if ('encoding' in envSourceTexture && THREE.sRGBEncoding) {
+        envSourceTexture.encoding = THREE.sRGBEncoding;
+      }
+      envSourceTexture.needsUpdate = true;
+
+      const pmremGenerator = new THREE.PMREMGenerator(renderer);
+      pmremGenerator.compileEquirectangularShader();
+      const envRenderTarget = pmremGenerator.fromEquirectangular(envSourceTexture);
+
+      // scene.background is intentionally left untouched (null/transparent)
+      // so the live camera video shows through.
+      scene.environment = envRenderTarget.texture;
+      pmremGenerator.dispose();
+    }
+
+    const sceneEl = document.querySelector('a-scene');
+    if (sceneEl.hasLoaded) {
+      applyEnvironmentReflections(sceneEl);
+    } else {
+      sceneEl.addEventListener('loaded', () => applyEnvironmentReflections(sceneEl));
+    }
+
+    // --- AR gate: camera (getUserMedia) + iOS motion-sensor permission ---
+    const arGate = document.getElementById('arGate');
+    const arGateStatus = document.getElementById('arGateStatus');
+    const startARBtn = document.getElementById('startAR');
+    const cameraVideo = document.getElementById('ar-camera');
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      arGateStatus.textContent = 'Camera access isn\u2019t available here \u2014 serve this page over HTTPS (or localhost) in a modern mobile browser.';
+      startARBtn.disabled = true;
+    }
+
+    async function requestDeviceOrientationIfNeeded() {
+      if (typeof DeviceOrientationEvent !== 'undefined' &&
+          typeof DeviceOrientationEvent.requestPermission === 'function') {
+        const response = await DeviceOrientationEvent.requestPermission();
+        if (response !== 'granted') {
+          throw new Error('Motion sensor permission was not granted.');
+        }
+      }
+    }
+
+    async function startAR() {
+      startARBtn.disabled = true;
+      arGateStatus.textContent = 'Requesting camera\u2026';
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' } },
+          audio: false
+        });
+        cameraVideo.srcObject = stream;
+        await cameraVideo.play();
+      } catch (err) {
+        arGateStatus.textContent = 'Camera access failed: ' + (err && err.message ? err.message : err) +
+          '. Check site permissions and that the page is served over HTTPS.';
+        startARBtn.disabled = false;
+        console.error('getUserMedia failed', err);
+        return;
+      }
+
+      try {
+        await requestDeviceOrientationIfNeeded();
+      } catch (err) {
+        arGateStatus.textContent = 'Motion sensor access was denied \u2014 look-around will be limited.';
+        console.warn('Device orientation permission issue', err);
+      }
+
+      arGate.style.display = 'none';
+    }
+
+    startARBtn.addEventListener('click', startAR);
+
+    const status = document.getElementById('status');
+    const modelEl = document.getElementById('block');
+    const block = modelEl;
+    let ravanRoot = null; // THREE.Object3D of the loaded, normalized Ravan mesh
+
+    // The model (~36MB, a single self-contained .glb with embedded textures)
+    // is fetched directly by gltf-model (no a-asset-item preload step), so
+    // give an early heads-up that a sizeable download is underway.
+    status.textContent = 'Downloading Ravan (~36MB) — this can take a moment…';
+
+    // Normalize the loaded GLTF: predictable height and bottom-center origin.
+    modelEl.addEventListener('model-loaded', () => {
+      const object = modelEl.getObject3D('mesh');
+      if (!object) {
+        status.textContent = 'GLTF loaded, but its mesh object was not found.';
+        return;
+      }
+      object.updateMatrixWorld(true);
+      let bounds = new THREE.Box3().setFromObject(object);
+      const size = new THREE.Vector3();
+      bounds.getSize(size);
+      if (!Number.isFinite(size.y) || size.y <= 0) {
+        status.textContent = 'GLTF loaded, but its dimensions could not be detected.';
+        return;
+      }
+      object.scale.setScalar(16 / size.y);
+      object.updateMatrixWorld(true);
+      bounds = new THREE.Box3().setFromObject(object);
+      const center = new THREE.Vector3();
+      bounds.getCenter(center);
+      // Box3 bounds are world-space; convert before adjusting the mesh's local origin.
+      const modelSpace = modelEl.object3D;
+      const localCenter = modelSpace.worldToLocal(center.clone());
+      const localBottom = modelSpace.worldToLocal(new THREE.Vector3(center.x, bounds.min.y, center.z));
+      object.position.x -= localCenter.x;
+      object.position.y -= localBottom.y;
+      object.position.z -= localCenter.z;
+      object.updateMatrixWorld(true);
+
+      // Remember the model's own materials so the ignition effect can actually
+      // tint the Ravan mesh itself (an A-Frame `material` component on this
+      // entity would be a no-op: the entity has no geometry of its own, the
+      // loaded glTF meshes live on child Object3D nodes).
+      ravanRoot = object;
+      object.traverse((node) => {
+        if (node.isMesh && node.material) {
+          const mats = Array.isArray(node.material) ? node.material : [node.material];
+          mats.forEach((mat) => {
+            if (!mat.userData.__ravanOriginal) {
+              mat.userData.__ravanOriginal = {
+                emissive: mat.emissive ? mat.emissive.clone() : null,
+                emissiveIntensity: mat.emissiveIntensity
+              };
+            }
+          });
+        }
+      });
+
+      status.textContent = 'Ravan model loaded. Tap Ignite Ravan to begin.';
+      console.info('Ravan GLTF loaded and normalized.', { originalHeight: size.y });
+    });
+
+    modelEl.addEventListener('model-error', (event) => {
+      status.textContent = 'Could not load Ravan. Check the ravan-model/model.glb path, then serve the project over HTTP/HTTPS.';
+      console.error('Ravan GLTF failed to load:', event.detail || event);
+    });
+
+    // Tint the Ravan model's own materials for the ignition effect by walking
+    // its meshes directly, rather than via a no-op A-Frame material component.
+    function setModelOnFire(isIgnited) {
+      if (!ravanRoot) return;
+      ravanRoot.traverse((node) => {
+        if (node.isMesh && node.material) {
+          const mats = Array.isArray(node.material) ? node.material : [node.material];
+          mats.forEach((mat) => {
+            const original = mat.userData.__ravanOriginal;
+            if (!original) return;
+            if (isIgnited) {
+              if (mat.emissive) mat.emissive.set('#ff3b08');
+              mat.emissiveIntensity = 1.4;
+            } else {
+              if (mat.emissive && original.emissive) mat.emissive.copy(original.emissive);
+              mat.emissiveIntensity = original.emissiveIntensity ?? 0;
+            }
+          });
+        }
+      });
+    }
+
+    const fire = document.getElementById('fire');
+    const glow = document.getElementById('fireGlow');
+    let ignited = false;
+    function ignite() {
+      ignited = true;
+      fire.setAttribute('visible', 'true');
+      setModelOnFire(true);
+      glow.setAttribute('light', 'type: point; color:#ff5a12; intensity:2.8; distance:35; decay:2');
+      status.textContent = 'IGNITION! Ravan is burning.';
+      document.getElementById('restart').textContent = '↻ Reset Ravan';
+      document.getElementById('title').style.color = '#ffad54';
+      document.getElementById('title').style.textShadow = '0 0 18px #ff4b0a';
+    }
+    function resetBlock() {
+      ignited = false;
+      fire.setAttribute('visible', 'false');
+      setModelOnFire(false);
+      glow.setAttribute('light', 'type: point; color:#ff5a12; intensity:0; distance:35; decay:2');
+      document.getElementById('title').style.color = '#f4f7ff';
+      document.getElementById('title').style.textShadow = '0 2px 12px #000';
+      status.textContent = 'Ravan model loaded. Tap Ignite Ravan to begin.';
+      document.getElementById('restart').textContent = '🔥 Ignite Ravan';
+    }
+    function handleButton() {
+      if (ignited) resetBlock();
+      else ignite();
+    }
+    document.getElementById('restart').addEventListener('click', handleButton);
+  </script>
+</body>
+</html>
